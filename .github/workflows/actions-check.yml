@@ -1,0 +1,11 @@
+# Checks that GitHub Actions runs in this public repository (free, no minutes limit).
+name: Actions check
+on:
+  push:
+    branches: [claude/sokas-repo-transfer-setup-y2siza]
+  workflow_dispatch:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Actions runs here"; java -version 2>&1 | head -1; df -h / | tail -1
