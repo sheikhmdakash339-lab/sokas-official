@@ -59,6 +59,17 @@ jobs:
           KEY_PASS: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+          # ALREADY SIGNED WITH THE RELEASE KEY (the main repository's build did it): publish it as is.
+          BT0=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          GOT0=$("$BT0/apksigner" verify --print-certs "$RUNNER_TEMP/in.apk" 2>/dev/null | grep -m1 'certificate SHA-256 digest' | awk '{print $NF}' || true)
+          if [ "$GOT0" = "$EXPECTED_CERT_SHA256" ]; then
+            echo "Already signed with the release key -- published unchanged."
+            "$BT0/aapt2" dump badging "$RUNNER_TEMP/in.apk" | head -1
+            mkdir -p "$GITHUB_WORKSPACE/out"
+            cp "$RUNNER_TEMP/in.apk" "$GITHUB_WORKSPACE/out/sokas-$VERSION_CODE.apk"
+            (cd "$GITHUB_WORKSPACE/out" && sha256sum "sokas-$VERSION_CODE.apk" > "sokas-$VERSION_CODE.sha256" && cat "sokas-$VERSION_CODE.sha256")
+            exit 0
+          fi
           if [ -z "$KS_B64" ] || [ -z "$STORE_PASS" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASS" ]; then
             echo "::error::Add the 4 secrets (RELEASE_KEYSTORE_BASE64, RELEASE_STORE_PASSWORD, RELEASE_KEY_ALIAS, RELEASE_KEY_PASSWORD) in this repository's Settings -> Secrets and variables -> Actions, then re-run."
             exit 1
