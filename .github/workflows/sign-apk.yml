@@ -1,0 +1,100 @@
+# SIGN A SOKAS APK WITH THE RELEASE KEY AND PUBLISH A DIRECT DOWNLOAD -- free.
+#
+# Why here: this repository is public, and GitHub Actions is free with no minutes limit on a
+# public repository. The private repository's Actions are blocked by billing.
+#
+# What it does: the APK is built in a Claude cloud session (tools/cloudbuild/android-build.sh in
+# the private repo) and pushed here in parts under GitHub's 100 MB file limit (apk-input/). This
+# job joins the parts, checks the SHA-256, removes the test signature, signs with the release key
+# from this repository's secrets, REFUSES to publish unless the certificate is the one the
+# installed app already has (so it always installs over the old app), and publishes it as a
+# release with a direct .apk link.
+#
+# Secrets needed (Settings -> Secrets and variables -> Actions): RELEASE_KEYSTORE_BASE64,
+# RELEASE_STORE_PASSWORD, RELEASE_KEY_ALIAS, RELEASE_KEY_PASSWORD. They are never printed.
+# Forks and pull requests do not receive them; the job runs only on a push by someone with
+# write access, or by hand.
+name: Sign SOKAS APK
+
+on:
+  push:
+    branches: [claude/sokas-repo-transfer-setup-y2siza]
+    paths: ["apk-input/**", ".github/workflows/sign-apk.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sign-apk
+  cancel-in-progress: false
+
+env:
+  # SHA-256 of the certificate SOKAS 690 (the app people have) is signed with.
+  EXPECTED_CERT_SHA256: 20bcaa30a9f553b593ca83e940cd579d11f0a78c5fec76564e5da22c829c09d9
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Join the APK parts and check them
+        run: |
+          set -euo pipefail
+          . apk-input/build.env
+          cat apk-input/sokas.apk.part-* > "$RUNNER_TEMP/in.apk"
+          echo "$APK_SHA256  $RUNNER_TEMP/in.apk" | sha256sum -c -
+          {
+            echo "VERSION_CODE=$VERSION_CODE"
+            echo "VERSION_NAME=$VERSION_NAME"
+            echo "SOURCE_COMMIT=$SOURCE_COMMIT"
+          } >> "$GITHUB_ENV"
+
+      - name: Sign with the release key
+        env:
+          KS_B64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          STORE_PASS: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KS_B64" ] || [ -z "$STORE_PASS" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASS" ]; then
+            echo "::error::Add the 4 secrets (RELEASE_KEYSTORE_BASE64, RELEASE_STORE_PASSWORD, RELEASE_KEY_ALIAS, RELEASE_KEY_PASSWORD) in this repository's Settings -> Secrets and variables -> Actions, then re-run."
+            exit 1
+          fi
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          W="$RUNNER_TEMP"
+          printf '%s' "$KS_B64" | base64 -d > "$W/release.jks"
+          cd "$W"
+          # Remove the test (debug) signature, re-align, sign with the release key.
+          zip -q -d in.apk 'META-INF/*.SF' 'META-INF/*.RSA' 'META-INF/*.EC' 'META-INF/*.DSA' 'META-INF/MANIFEST.MF' || true
+          "$BT/zipalign" -P 16 -f 4 in.apk aligned.apk || "$BT/zipalign" -p -f 4 in.apk aligned.apk
+          "$BT/apksigner" sign --ks release.jks --ks-pass env:STORE_PASS --key-pass env:KEY_PASS \
+            --ks-key-alias "$KEY_ALIAS" --out "sokas-$VERSION_CODE.apk" aligned.apk
+          rm -f release.jks in.apk aligned.apk
+          GOT=$("$BT/apksigner" verify --print-certs "sokas-$VERSION_CODE.apk" | grep -m1 'certificate SHA-256 digest' | awk '{print $NF}')
+          if [ "$GOT" != "$EXPECTED_CERT_SHA256" ]; then
+            echo "::error::Signed with a different key ($GOT). It would not install over the old app, so it is not published."
+            exit 1
+          fi
+          "$BT/apksigner" verify -v "sokas-$VERSION_CODE.apk" | grep -E 'Verified using v[123] scheme'
+          "$BT/aapt2" dump badging "sokas-$VERSION_CODE.apk" | head -1
+          sha256sum "sokas-$VERSION_CODE.apk" > "sokas-$VERSION_CODE.sha256"
+          cat "sokas-$VERSION_CODE.sha256"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          mv "sokas-$VERSION_CODE.apk" "sokas-$VERSION_CODE.sha256" "$GITHUB_WORKSPACE/out/"
+
+      - name: Publish the direct download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="apk-$VERSION_CODE"
+          NOTES="SOKAS $VERSION_NAME (version code $VERSION_CODE), source commit $SOURCE_COMMIT. Signed with the release key: installs over the existing app. Not published to Play."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/* --clobber
+          else
+            gh release create "$TAG" out/* --title "SOKAS $VERSION_CODE ($VERSION_NAME)" --notes "$NOTES" --target "$GITHUB_SHA"
+          fi
+          echo "Download: https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/sokas-$VERSION_CODE.apk"
